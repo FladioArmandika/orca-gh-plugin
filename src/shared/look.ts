@@ -20,6 +20,7 @@ export function reviewLook(decision: string | null): Look | null {
 export function checksLook(checks: ChecksSummary): Look | null {
   if (checks.total === 0) return null
   if (checks.failed > 0) return { text: `${checks.failed} failing`, tone: 'danger' }
+  if (checks.notRun > 0) return { text: "Checks didn't run", tone: 'warning' }
   if (checks.pending > 0) return { text: `${checks.pending} pending`, tone: 'warning' }
   return { text: 'Checks pass', tone: 'success' }
 }
@@ -28,11 +29,18 @@ export function checksLine(checks: ChecksSummary): string {
   if (checks.total === 0) return 'No checks'
   const parts = [
     checks.failed ? `${checks.failed} failing` : '',
+    checks.notRun ? `${checks.notRun} didn't run` : '',
     checks.pending ? `${checks.pending} pending` : '',
     checks.passed ? `${checks.passed} passed` : '',
     checks.skipped ? `${checks.skipped} skipped` : ''
   ].filter(Boolean)
   return parts.join(' · ')
+}
+
+export function checksTone(checks: ChecksSummary): Tone | undefined {
+  if (checks.failed) return 'danger'
+  if (checks.notRun || checks.pending) return 'warning'
+  return checks.total ? 'success' : undefined
 }
 
 export function mergeLook(pr: Pick<PrSummary, 'mergeState' | 'mergeable' | 'draft'>): Look | null {
@@ -75,6 +83,7 @@ export function badges(pr: PrSummary): Look[] {
   const out: Look[] = []
   if (pr.draft) out.push({ text: 'Draft', tone: 'neutral' })
   if (pr.reviewRequestedFromMe) out.push({ text: 'Your review', tone: 'accent' })
+  if (pr.autoMerge) out.push({ text: 'Auto-merge on', tone: 'accent' })
   for (const look of [reviewLook(pr.reviewDecision), checksLook(pr.checks), mergeLook(pr)]) {
     if (look) out.push(look)
   }

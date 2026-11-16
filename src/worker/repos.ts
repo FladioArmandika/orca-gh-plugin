@@ -2,6 +2,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import { basename, join, relative } from 'node:path'
 import type { RepoInfo } from '../protocol'
+import { shortNames } from '../shared/title'
 import { run, type Run } from './exec'
 
 const SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
@@ -62,13 +63,13 @@ export async function remoteOf(path: string, runner: Run = run): Promise<{ name:
 export async function describeRepo(path: string, name: string, runner: Run = run): Promise<RepoInfo> {
   const [remote, head] = await Promise.all([remoteOf(path, runner), git(path, ['rev-parse', '--abbrev-ref', 'HEAD'], runner)])
   const branch = head && head !== 'HEAD' ? head : null
-  if (!remote) return { name, path, slug: null, branch, problem: 'No Git remote' }
+  if (!remote) return { name, short: name, path, slug: null, branch, problem: 'No Git remote' }
   const parsed = parseRemote(remote.url)
-  if (!parsed) return { name, path, slug: null, branch, problem: `Not a GitHub remote: ${remote.url}` }
+  if (!parsed) return { name, short: name, path, slug: null, branch, problem: `Not a GitHub remote: ${remote.url}` }
   let github = isGitHubHost(parsed.host)
   if (!github) github = isGitHubHost((await sshHostName(parsed.host, runner)) ?? '')
-  if (!github) return { name, path, slug: null, branch, problem: `Not on github.com: ${parsed.host}` }
-  return { name, path, slug: parsed.slug, branch, problem: null }
+  if (!github) return { name, short: name, path, slug: null, branch, problem: `Not on github.com: ${parsed.host}` }
+  return { name, short: name, path, slug: parsed.slug, branch, problem: null }
 }
 
 async function isRepo(dir: string): Promise<boolean> {
@@ -113,7 +114,9 @@ export async function findRepoPaths(root: string, depth: number, limit = 40): Pr
 
 export async function discoverRepos(root: string, depth: number, runner: Run = run): Promise<RepoInfo[]> {
   const paths = await findRepoPaths(root, depth)
-  return Promise.all(
+  const repos = await Promise.all(
     paths.map((path) => describeRepo(path, path === root ? basename(root) : relative(root, path), runner))
   )
+  const short = shortNames(repos.map((repo) => repo.name))
+  return repos.map((repo) => ({ ...repo, short: short.get(repo.name) ?? repo.name }))
 }

@@ -1,7 +1,7 @@
 import { assert, test } from 'orca/testing'
-import { actionArgs, flagsFor, summarizeChecks, toDetail, toSummary } from './gh'
+import { actionArgs, failedJobs, flagsFor, jobIdOf, summarizeChecks, toDetail, toSummary } from './gh'
 
-const repo = { name: 'shop-be', path: '/work/shop/shop-be', slug: 'acme/shop-be', branch: null, problem: null }
+const repo = { name: 'shop-be', short: 'be', path: '/work/shop/shop-be', slug: 'acme/shop-be', branch: null, problem: null }
 
 test('counts checks: skipped apart, cancelled fails', () => {
   assert.deepEqual(
@@ -13,9 +13,9 @@ test('counts checks: skipped apart, cancelled fails', () => {
       { __typename: 'StatusContext', state: 'PENDING' },
       { __typename: 'StatusContext', state: 'ERROR' }
     ]),
-    { total: 6, passed: 1, failed: 2, pending: 2, skipped: 1 }
+    { total: 6, passed: 1, failed: 2, pending: 2, skipped: 1, notRun: 0 }
   )
-  assert.deepEqual(summarizeChecks(null), { total: 0, passed: 0, failed: 0, pending: 0, skipped: 0 })
+  assert.deepEqual(summarizeChecks(null), { total: 0, passed: 0, failed: 0, pending: 0, skipped: 0, notRun: 0 })
 })
 
 test('turns gh pr list JSON into a summary', () => {
@@ -88,4 +88,41 @@ test('never deletes a kept branch and guards the merge with the head commit', ()
   ])
   assert.equal(typeof actionArgs({ repo: 'a/b', number: 1, action: 'request-changes', body: ' ' }, null, []), 'string')
   assert.deepEqual(actionArgs({ repo: 'a/b', number: 1, action: 'draft' }, null, []), ['pr', 'ready', '1', '-R', 'a/b', '--undo'])
+})
+
+test('builds auto-merge on and off, and finds the jobs of failed checks', () => {
+  assert.deepEqual(
+    actionArgs({ repo: 'a/b', number: 3, action: 'auto-merge', method: 'merge', sha: 'abc', deleteBranch: true }, 'feat/3-x', ['main']),
+    ['pr', 'merge', '3', '-R', 'a/b', '--auto', '--merge', '--match-head-commit', 'abc', '--delete-branch']
+  )
+  assert.deepEqual(actionArgs({ repo: 'a/b', number: 3, action: 'cancel-auto-merge' }, null, []), ['pr', 'merge', '3', '-R', 'a/b', '--disable-auto'])
+  assert.equal(jobIdOf('https://github.com/a/b/actions/runs/43/job/1334?pr=7'), '1334')
+  assert.equal(jobIdOf('https://ci.example.com/build/1'), null)
+  assert.deepEqual(
+    failedJobs([
+      { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'FAILURE', detailsUrl: 'https://github.com/a/b/actions/runs/1/job/9' },
+      { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS', detailsUrl: 'https://github.com/a/b/actions/runs/1/job/8' },
+      { __typename: 'StatusContext', state: 'FAILURE', targetUrl: 'https://ci.example.com/1' }
+    ]),
+    ['9']
+  )
+})
+
+test('reads the headline, kind and task link of a pull request', () => {
+  const summary = toSummary(
+    {
+      number: 5,
+      title: 'feat(cards): gift cards at checkout (42)',
+      url: 'u',
+      headRefName: 'feat/42-gift-cards',
+      baseRefName: 'development',
+      body: '**Task:** [Gift cards (Tasks 42)](https://tasks.example.com/42), under [Payments](https://tasks.example.com/1)',
+      autoMergeRequest: { enabledAt: '2026-11-16T10:00:00Z' }
+    },
+    repo,
+    null
+  )
+  assert.deepEqual([summary.repoLabel, summary.kind, summary.headline], ['be', 'feat(cards)', 'Gift cards at checkout'])
+  assert.deepEqual([summary.taskTitle, summary.taskUrl], ['Gift cards', 'https://tasks.example.com/42'])
+  assert.equal(summary.autoMerge, true)
 })

@@ -67,6 +67,9 @@ export type PrGroup = {
   key: string
   /** `Task 1234`, or the branch when no task id is found. */
   label: string
+  /** The task's name and link from one of its descriptions. */
+  taskTitle: string | null
+  taskUrl: string | null
   /** The branch every PR of the group shares; null when they differ. */
   branch: string | null
   prs: PrSummary[]
@@ -90,9 +93,12 @@ export function groupPrs(prs: readonly PrSummary[], order: readonly string[]): P
       const heads = new Set(items.map((pr) => pr.head))
       const branch = heads.size === 1 ? items[0].head : null
       const task = items[0].task
+      const named = items.find((pr) => pr.taskTitle)
       return {
         key,
         label: task ? `Task ${task}` : items[0].head,
+        taskTitle: named?.taskTitle ?? null,
+        taskUrl: named?.taskUrl ?? null,
         branch,
         prs: mergeSequence(items, order),
         updatedAt: Math.max(...items.map((pr) => pr.updatedAt))
@@ -111,14 +117,15 @@ export const FILTERS: readonly { value: PrFilter; label: string }[] = [
   { value: 'attention', label: 'Needs attention' }
 ]
 
-/** No failing or pending checks, no conflicts, no open pull request it waits for, and no review
- *  still owed or asking for changes. */
+/** No failing, pending or never-run checks, no conflicts, no open pull request it waits for, and
+ *  no review still owed or asking for changes. */
 export function isReady(pr: PrSummary): boolean {
   return (
     !pr.draft &&
     pr.waitsFor.length === 0 &&
     pr.checks.failed === 0 &&
     pr.checks.pending === 0 &&
+    pr.checks.notRun === 0 &&
     pr.mergeable !== 'CONFLICTING' &&
     pr.reviewDecision !== 'CHANGES_REQUESTED' &&
     pr.reviewDecision !== 'REVIEW_REQUIRED'
@@ -137,7 +144,7 @@ export function matches(pr: PrSummary, filter: PrFilter, hideDrafts: boolean, qu
   if (filter === 'attention' && !needsAttention(pr)) return false
   const q = query.trim().toLowerCase()
   if (!q) return true
-  const haystack = [pr.title, pr.head, pr.author, pr.repoName, `#${pr.number}`, pr.task ?? '', ...pr.labels]
+  const haystack = [pr.title, pr.head, pr.author, pr.repoName, `#${pr.number}`, pr.task ?? '', pr.taskTitle ?? '', ...pr.labels]
     .join('\n')
     .toLowerCase()
   return q.split(/\s+/).every((word) => haystack.includes(word))

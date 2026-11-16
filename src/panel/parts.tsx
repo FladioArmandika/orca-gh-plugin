@@ -2,17 +2,17 @@
 import { Badge, Button, Callout, ListItem, read, RelativeTime, Row, set, Text } from 'orca'
 import type { PrSummary } from '../protocol'
 import { badges } from '../shared/look'
-import { allPrs, busy, confirmPending, notice, openPr, pending } from './state'
+import { allPrs, busy, confirmPending, notice, openPr, pending, prName } from './state'
 
-/** `shop-be#12` for a pull request key, from the list when it is there. */
+/** `be#12` for a pull request key, from the list when it is there. */
 export function prLabel(key: string): string {
   const pr = allPrs().find((p) => p.key === key)
-  if (pr) return `${pr.repoName}#${pr.number}`
+  if (pr) return prName(pr)
   const [slug, number] = key.split('#')
   return `${slug.split('/')[1] ?? slug}#${number}`
 }
 
-/** "shop-be#13 waits for shop-be#12" for each pair. */
+/** "be#13 waits for be#12" for each pair. */
 export function waitsLine(pairs: readonly [string, string][]): string {
   return pairs.map(([waiting, waited]) => `${prLabel(waiting)} waits for ${prLabel(waited)}`).join('; ')
 }
@@ -38,13 +38,20 @@ export function badgeRow(pr: PrSummary) {
   )
 }
 
-export function prItem(pr: PrSummary, showRepo: boolean) {
-  const where = `${pr.head} → ${pr.base}`
+/** A pull request row. In a task card the card already names the branch, so the row leaves it
+ *  out; in a repo's list the repo is already named. */
+export function prItem(pr: PrSummary, place: 'card' | 'repo' | 'list') {
+  const parts = [
+    place === 'repo' ? `#${pr.number}` : prName(pr),
+    pr.kind,
+    place === 'card' ? null : `${pr.head} → ${pr.base}`,
+    pr.author
+  ].filter(Boolean)
   return (
     <ListItem
       key={pr.key}
-      title={`#${pr.number} ${pr.title}`}
-      description={`${showRepo ? `${pr.repoName} · ` : ''}${where} · ${pr.author}`}
+      title={pr.headline}
+      description={parts.join(' · ')}
       icon={pr.draft ? 'edit' : 'branch'}
       onPress={() => openPr(pr.key)}
     >

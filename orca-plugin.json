@@ -2,8 +2,8 @@
   "manifestVersion": 2,
   "id": "project-prs",
   "name": "Project PRs",
-  "version": "0.1.0",
-  "description": "Every open pull request of the GitHub repos inside an Orca project, grouped by task across repos: review, merge in order (backend first), and open PRs for a branch in each repo at once. Uses the gh CLI.",
+  "version": "0.2.0",
+  "description": "Every open pull request of the GitHub repos inside an Orca project, grouped by task across repos: review with diffs, merge in order (backend first) or when green, check a task out in every repo, open and merge releases, and follow it all from the status bar. Uses the gh CLI.",
   "author": {
     "name": "Fladio Armandika",
     "url": "https://github.com/FladioArmandika"
@@ -69,6 +69,14 @@
         ]
       },
       {
+        "key": "developBranch",
+        "title": "Branch releases are made from",
+        "description": "The Release tab compares it with the release branch and opens develop → release pull requests.",
+        "type": "string",
+        "default": "development",
+        "placeholder": "development"
+      },
+      {
         "key": "deleteBranch",
         "title": "Delete the branch after merging",
         "description": "Ticked by default in the merge box. Branches listed below are never deleted.",
@@ -122,6 +130,37 @@
         "default": 50,
         "minimum": 5,
         "maximum": 100
+      },
+      {
+        "key": "refreshMinutes",
+        "title": "Refresh every (minutes)",
+        "description": "How often the open panel and the status bar fetch pull requests again. 0 turns it off.",
+        "type": "integer",
+        "default": 3,
+        "minimum": 0,
+        "maximum": 60
+      },
+      {
+        "key": "notify",
+        "title": "Notify me",
+        "description": "When your review is requested, a task becomes ready to merge, or one of your pull requests is approved or gets changes requested.",
+        "type": "boolean",
+        "default": true
+      }
+    ],
+    "commands": [
+      {
+        "id": "project-prs.refresh",
+        "title": "Project PRs: Refresh pull requests"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "prs",
+        "text": "PRs",
+        "icon": "layers",
+        "tooltip": "Project PRs: press to refresh",
+        "command": "project-prs.refresh"
       }
     ]
   },
@@ -134,6 +173,12 @@
     },
     {
       "kind": "agent:launch"
+    },
+    {
+      "kind": "notifications:show"
+    },
+    {
+      "kind": "storage:own"
     }
   ]
 }

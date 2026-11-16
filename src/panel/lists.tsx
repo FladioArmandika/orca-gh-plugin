@@ -1,4 +1,5 @@
-// The list side of the panel: project picker, filters, and the By task / By repo / New PR tabs.
+// The list side of the panel: project picker, filters, and the By task / By repo / New PR /
+// Release tabs.
 import {
   Badge,
   Box,
@@ -23,19 +24,9 @@ import {
   Text
 } from 'orca'
 import type { NewPrCandidate, PrSummary, ProjectPrs } from '../protocol'
-import {
-  byMergeOrder,
-  FILTERS,
-  groupPrs,
-  isReady,
-  matches,
-  methodFor,
-  needsAttention,
-  waitsOutside,
-  type PrFilter,
-  type PrGroup
-} from '../shared/group'
-import { confirmBox, noticeBox, prItem, waitsLine } from './parts'
+import { byMergeOrder, FILTERS, groupPrs, isReady, matches, needsAttention, type PrFilter, type PrGroup } from '../shared/group'
+import { confirmBox, noticeBox, prItem } from './parts'
+import { releaseView } from './release'
 import {
   allPrs,
   ask,
@@ -51,14 +42,13 @@ import {
   list,
   listLoading,
   loadList,
-  mergeGroup,
   pickProject,
   pickView,
   projects,
   query,
-  reviewWithAgent,
   view
 } from './state'
+import { taskActions, taskLine, taskTitle } from './task'
 
 const FOCUSED = '__focused__'
 
@@ -116,6 +106,18 @@ function summary(data: ProjectPrs) {
   )
 }
 
+/** Checks GitHub never started (a spending limit, a failed payment): once for the project,
+ *  in GitHub's words, rather than as a red badge on every row. */
+function ciNotice(data: ProjectPrs) {
+  const prs = allPrs(data).filter((pr) => pr.checks.notRun > 0)
+  if (!data.ciNote || prs.length === 0) return null
+  return (
+    <Callout tone="warning" icon="warning" title={`Checks didn't run on ${prs.length} pull request${prs.length === 1 ? '' : 's'}`}>
+      {data.ciNote}
+    </Callout>
+  )
+}
+
 function filters() {
   return (
     <Stack gap="xs">
@@ -143,57 +145,12 @@ function filters() {
   )
 }
 
-function confirmGroupMerge(group: PrGroup, data: ProjectPrs) {
-  const prs = group.prs.filter((pr) => !pr.draft)
-  const defaults = data.defaults
-  const method = methodFor(prs[0], defaults)
-  const warnings = prs.filter((pr) => !isReady(pr)).map((pr) => `${pr.repoName}#${pr.number}`)
-  ask({
-    title: `Merge ${group.label}?`,
-    body:
-      `${prs.map((pr) => `${pr.repoName}#${pr.number}`).join(' → ')}, in this order, ${method}` +
-      `${defaults.deleteBranch ? ', deleting feature branches' : ''}. It stops at the first that fails.` +
-      (warnings.length ? ` Not ready yet: ${warnings.join(', ')}.` : '') +
-      (prs.length < group.prs.length ? ' Drafts are left out.' : ''),
-    label: `Merge ${prs.length}`,
-    tone: warnings.length ? 'warning' : 'success',
-    run: () => mergeGroup(group, prs, method, defaults.deleteBranch)
-  })
-}
-
 function groupCard(group: PrGroup, data: ProjectPrs) {
-  const mergeable = group.prs.filter((pr) => !pr.draft)
-  const order = group.prs.map((pr) => pr.repoName).join(' → ')
-  const blocked = waitsOutside(mergeable)
   return (
-    <Card key={group.key} title={group.label} description={`${group.branch ?? 'several branches'} · ${order}`}>
+    <Card key={group.key} title={taskTitle(group)} description={taskLine(group)}>
       <Stack gap="xs">
-        <List label={group.label}>{group.prs.map((pr) => prItem(pr, true))}</List>
-        {blocked.length > 0 ? (
-          <Text size="sm" tone="warning">
-            {`${waitsLine(blocked)}, still open. Merge that first.`}
-          </Text>
-        ) : null}
-        <Row gap="xs" wrap>
-          <Button
-            size="sm"
-            variant="outline"
-            tone="success"
-            icon="check"
-            disabled={!!read(busy) || mergeable.length === 0 || blocked.length > 0}
-            tooltip={
-              blocked.length > 0
-                ? 'Waits for a pull request outside this task'
-                : 'Merge each PR in repo order (backend first), after the ones it waits for'
-            }
-            onPress={() => confirmGroupMerge(group, data)}
-          >
-            {`Merge ${mergeable.length} in order`}
-          </Button>
-          <Button size="sm" variant="ghost" icon="agent" disabled={!!read(busy)} onPress={() => reviewWithAgent(group.prs)}>
-            {`Review with ${data.defaults.agent || 'agent'}`}
-          </Button>
-        </Row>
+        <List label={group.label}>{group.prs.map((pr) => prItem(pr, 'card'))}</List>
+        {taskActions(group, data)}
       </Stack>
     </Card>
   )
@@ -215,7 +172,7 @@ function byTask(data: ProjectPrs, prs: PrSummary[]) {
       {single.length > 0 ? (
         <Stack gap="xs">
           <Text weight="semibold" size="sm">{`Single repo (${single.length})`}</Text>
-          <List label="Single repo">{single.map((pr) => prItem(pr, true))}</List>
+          <List label="Single repo">{single.map((pr) => prItem(pr, 'list'))}</List>
         </Stack>
       ) : null}
     </Stack>
@@ -232,13 +189,13 @@ function byRepo(data: ProjectPrs, prs: PrSummary[]) {
         const mine = prs.filter((pr) => pr.repo === repo.slug)
         const where = `${repo.slug ?? 'no GitHub remote'}${repo.branch ? ` · on ${repo.branch}` : ''}`
         return (
-          <Collapsible key={repo.path} title={`${repo.name} (${mine.length})`} description={where} defaultOpen={mine.length > 0}>
+          <Collapsible key={repo.path} title={`${repo.short} (${mine.length})`} description={where} defaultOpen={mine.length > 0}>
             {error ? (
               <Callout tone={repo.slug ? 'danger' : 'neutral'} icon={repo.slug ? 'error' : 'info'}>
                 {error}
               </Callout>
             ) : mine.length > 0 ? (
-              <List label={repo.name}>{mine.map((pr) => prItem(pr, false))}</List>
+              <List label={repo.short}>{mine.map((pr) => prItem(pr, 'repo'))}</List>
             ) : (
               <Text muted size="sm">
                 No open pull requests here.
@@ -258,12 +215,12 @@ function aheadLine(c: NewPrCandidate): string {
 }
 
 function confirmCreate(items: NewPrCandidate[], asDraft: boolean) {
-  const names = items.map((c) => c.repo.name).join(', ')
+  const names = items.map((c) => c.repo.short).join(', ')
   const pushes = items.some((c) => c.unpushed !== 0)
   ask({
     title: items.length > 1 ? `Open ${items.length} pull requests?` : `Open a pull request in ${names}?`,
     body:
-      `${items.map((c) => `${c.repo.name}: ${c.branch} → ${c.base}`).join('; ')}.` +
+      `${items.map((c) => `${c.repo.short}: ${c.branch} → ${c.base}`).join('; ')}.` +
       (pushes ? ' Branches with unpushed commits are pushed first.' : '') +
       ' Title and description come from the commits (gh --fill); edit them on GitHub after.' +
       (items.some((c) => c.dirty) ? ' Uncommitted changes stay out.' : ''),
@@ -289,16 +246,16 @@ function newPrs() {
   }
   const byBranch = new Map<string, NewPrCandidate[]>()
   for (const c of items) byBranch.set(c.branch, [...(byBranch.get(c.branch) ?? []), c])
-  const shared = [...byBranch.entries()].filter(([, list]) => list.length > 1)
+  const shared = [...byBranch.entries()].filter(([, group]) => group.length > 1)
   return (
     <Stack gap="sm">
-      {shared.map(([branch, list]) => (
-        <Button key={branch} icon="add" disabled={!!read(busy)} onPress={() => confirmCreate(list, false)}>
-          {`Open PRs for ${branch} in ${list.length} repos`}
+      {shared.map(([branch, group]) => (
+        <Button key={branch} icon="add" disabled={!!read(busy)} onPress={() => confirmCreate(group, false)}>
+          {`Open PRs for ${branch} in ${group.length} repos`}
         </Button>
       ))}
       {items.map((c) => (
-        <Card key={c.repo.path} title={c.repo.name} description={`${c.branch} → ${c.base}`}>
+        <Card key={c.repo.path} title={c.repo.short} description={`${c.branch} → ${c.base}`}>
           <Stack gap="xs">
             <Text size="sm" muted>
               {aheadLine(c)}
@@ -380,17 +337,23 @@ function body(data: ProjectPrs | null) {
       <Tab value="new" label="New PR" icon="add">
         {current === 'new' ? newPrs() : null}
       </Tab>
+      <Tab value="release" label="Release" icon="rocket">
+        {current === 'release' ? releaseView(data) : null}
+      </Tab>
     </Tabs>
   )
 }
 
 export function listView() {
   const data = read(list)
+  const github = !!data?.project && !data.error && data.repos.some((r) => r.repo.slug)
+  const current = read(view)
   return (
     <Stack gap="sm">
       {projectPicker()}
-      {data && data.project && !data.error && data.repos.some((r) => r.repo.slug) ? summary(data) : null}
-      {data && data.project && data.repos.some((r) => r.repo.slug) && read(view) !== 'new' ? filters() : null}
+      {github && data ? summary(data) : null}
+      {github && data ? ciNotice(data) : null}
+      {github && (current === 'task' || current === 'repo') ? filters() : null}
       {noticeBox()}
       {confirmBox()}
       {body(data)}

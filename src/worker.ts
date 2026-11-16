@@ -1,12 +1,18 @@
 // The plugin's worker: finds the GitHub repos inside an Orca project and answers the panel with
-// their pull requests, through the gh CLI. Orca transpiles this file when it loads.
+// their pull requests, through the gh CLI; keeps the status bar item current and notifies.
+// Orca transpiles this file when it loads.
 import type { OrcaWorkerApi } from 'orca/worker'
-import type { ActionResult, MergeDefaults, MergeMethod, ProjectInfo, ProjectPrs, RepoInfo, RepoPrs } from './protocol'
+import type { ActionResult, MergeDefaults, MergeMethod, PrAction, ProjectInfo, ProjectPrs, RepoInfo, RepoPrs } from './protocol'
 import { resolveDependency } from './shared/deps'
-import { mergeSequence, parseList } from './shared/group'
-import { act, defaultBranch, gh, listPrs, viewerLogin, viewPr, type ListedPr } from './worker/gh'
+import { parseList } from './shared/group'
+import { markRuns, NotRunProbe, withNotRun } from './worker/checks'
+import { switchBranch } from './worker/checkout'
+import { DiffCache } from './worker/diff'
+import { act, defaultBranch, gh, jobIdOf, listPrs, viewerLogin, viewPr, type ListedPr } from './worker/gh'
 import { candidateFor, createPr } from './worker/newpr'
+import { branchOk, compare, openRelease } from './worker/release'
 import { describeRepo, discoverRepos } from './worker/repos'
+import { fingerprint, snapshot, statusOf, whatChanged, type Snapshot } from './worker/watch'
 
 type Workspace = { id: string; name: string; projectId?: string | null; path: string; hostId: string | null }
 type Context = {
@@ -15,11 +21,13 @@ type Context = {
   focused: Workspace | null
   focusedProjectId: string | null
 }
-type Settings = { defaults: MergeDefaults; scanDepth: number; prLimit: number; newPrBase: string }
+type Settings = { defaults: MergeDefaults; scanDepth: number; prLimit: number; newPrBase: string; notify: boolean }
 
 const LIST_TTL_MS = 60_000
 const DEFAULT_KEEP = 'main master development develop staging production release'
 const DEFAULT_ORDER = 'be backend api server'
+const WATCH_KEY = 'watchProject'
+const STATUS_ITEM = 'prs'
 
 const method = (value: unknown, fallback: MergeMethod): MergeMethod =>
   value === 'squash' || value === 'merge' || value === 'rebase' ? value : fallback
@@ -28,6 +36,7 @@ const int = (value: unknown, fallback: number, min: number, max: number): number
   typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback
 const slugOk = (slug: unknown): slug is string => typeof slug === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(slug)
 const numberOk = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n > 0
+const unref = (timer: unknown) => (timer as { unref?: () => void } | null)?.unref?.()
 
 export async function readSettings(orca: OrcaWorkerApi): Promise<Settings> {
   let s: Record<string, unknown> = {}
@@ -44,14 +53,17 @@ export async function readSettings(orca: OrcaWorkerApi): Promise<Settings> {
       mergeMethod: method(s.mergeMethod, 'squash'),
       releaseBranch,
       releaseMergeMethod: method(s.releaseMergeMethod, 'merge'),
+      developBranch: text(s.developBranch, 'development') || 'development',
       deleteBranch: s.deleteBranch !== false,
       keepBranches: keep,
       mergeOrder: parseList(s.mergeOrder ?? DEFAULT_ORDER),
-      agent: text(s.reviewAgent, '')
+      agent: text(s.reviewAgent, ''),
+      refreshMinutes: int(s.refreshMinutes, 3, 0, 60)
     },
     scanDepth: int(s.scanDepth, 2, 1, 3),
     prLimit: int(s.prLimit, 50, 5, 100),
-    newPrBase: text(s.newPrBase, '')
+    newPrBase: text(s.newPrBase, ''),
+    notify: s.notify !== false
   }
 }
 
@@ -93,11 +105,20 @@ function rootFor(project: ProjectInfo, ctx: Context): string {
   return ctx.focused && ctx.focused.projectId === project.id ? ctx.focused.path : project.path
 }
 
+let stopWatching: (() => void) | null = null
+
+export function deactivate(): void {
+  stopWatching?.()
+  stopWatching = null
+}
+
 export default function activate(orca: OrcaWorkerApi): void {
   const lists = new Map<string, { at: number; data: ProjectPrs }>()
   const inflight = new Map<string, Promise<ProjectPrs>>()
   /** Every repo the worker has seen, by slug, so later requests name repos the panel listed. */
   const known = new Map<string, RepoInfo>()
+  const probe = new NotRunProbe()
+  const diffs = new DiffCache()
   let viewer: string | null = null
 
   async function me(): Promise<string | null> {
@@ -107,7 +128,8 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   const repoFor = (slug: string): RepoInfo & { slug: string } => {
     const repo = known.get(slug)
-    return { ...(repo ?? { name: slug.split('/')[1], path: '', branch: null, problem: null }), slug }
+    const name = slug.split('/')[1]
+    return { ...(repo ?? { name, short: name, path: '', branch: null, problem: null }), slug }
   }
 
   function changed(repos: string[]): void {
@@ -116,7 +138,14 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   async function fetchList(project: ProjectInfo, root: string, settings: Settings): Promise<ProjectPrs> {
-    const base = { project, viewer: null, repos: [] as RepoPrs[], fetchedAt: Date.now(), defaults: settings.defaults }
+    const base = {
+      project,
+      viewer: null,
+      repos: [] as RepoPrs[],
+      fetchedAt: Date.now(),
+      defaults: settings.defaults,
+      ciNote: null
+    }
     const repos = await discoverRepos(root, settings.scanDepth)
     for (const repo of repos) if (repo.slug) known.set(repo.slug, repo)
     let login: string | null
@@ -135,24 +164,32 @@ export default function activate(orca: OrcaWorkerApi): void {
         }
       })
     )
+    // Failed checks that never started (a spending limit, say) are not the code's fault.
+    await probe.probe(listed.flatMap((r) => r.prs.flatMap((pr) => pr.failedJobs.slice(0, 6).map((job) => ({ slug: pr.repo, job })))))
     // "Merge after be#12": keep the ones that point at a pull request still open here.
     const names = repos.flatMap((r) => (r.slug ? [{ slug: r.slug, name: r.name }] : []))
     const open = new Set(listed.flatMap((r) => r.prs.map((pr) => pr.key)))
+    let ciNote: string | null = null
     const results: RepoPrs[] = listed.map(({ repo, prs, error }) => ({
       repo,
       error,
-      prs: prs.map(({ deps, ...pr }) => ({
-        ...pr,
-        waitsFor: [
-          ...new Set(
-            deps
-              .map((ref) => resolveDependency(ref, { slug: pr.repo, name: pr.repoName }, names))
-              .filter((key): key is string => !!key && key !== pr.key && open.has(key))
-          )
-        ]
-      }))
+      prs: prs.map(({ deps, failedJobs, ...pr }) => {
+        const marked = withNotRun(pr.checks, failedJobs, probe)
+        ciNote ??= marked.note
+        return {
+          ...pr,
+          checks: marked.checks,
+          waitsFor: [
+            ...new Set(
+              deps
+                .map((ref) => resolveDependency(ref, { slug: pr.repo, name: pr.repoName }, names))
+                .filter((key): key is string => !!key && key !== pr.key && open.has(key))
+            )
+          ]
+        }
+      })
     }))
-    return { ...base, viewer: login, repos: results, error: null }
+    return { ...base, viewer: login, repos: results, ciNote, error: null }
   }
 
   async function listProject(projectId: string | null, refresh: boolean): Promise<ProjectPrs> {
@@ -165,6 +202,7 @@ export default function activate(orca: OrcaWorkerApi): void {
         repos: [],
         fetchedAt: Date.now(),
         defaults: settings.defaults,
+        ciNote: null,
         error: projectId ? 'That project is no longer in Orca.' : null
       }
     }
@@ -184,6 +222,15 @@ export default function activate(orca: OrcaWorkerApi): void {
     return next
   }
 
+  /** A repo the worker found itself, looking again when an idle restart emptied its memory: the
+   *  panel never names an arbitrary folder. */
+  async function foundRepo(projectId: string | null, match: (repo: RepoInfo) => boolean): Promise<RepoInfo | null> {
+    const find = () => [...known.values()].find(match) ?? null
+    if (find()) return find()
+    await listProject(projectId, false)
+    return find()
+  }
+
   orca.panels.handle('projects.list', async () => {
     const ctx = await readContext(orca)
     return { projects: ctx.projects, focusedProjectId: ctx.focusedProjectId }
@@ -194,9 +241,29 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('pr.detail', async ({ repo, number }) => {
     if (!slugOk(repo) || !numberOk(number)) return { detail: null, error: 'Unknown pull request' }
     try {
-      return { detail: await viewPr(repoFor(repo), number, await me()), error: null }
+      const detail = await viewPr(repoFor(repo), number, await me())
+      const failed = detail.checkRuns.filter((r) => r.state === 'failed').flatMap((r) => {
+        const job = jobIdOf(r.url)
+        return job ? [{ slug: repo, job }] : []
+      })
+      await probe.probe(failed)
+      const marked = markRuns(detail.checkRuns, detail.checks, jobIdOf, probe)
+      return { detail: { ...detail, checkRuns: marked.runs, checks: marked.checks }, error: null }
     } catch (error) {
       return { detail: null, error: (error as Error).message }
+    }
+  })
+
+  orca.panels.handle('pr.diff', async ({ repo, number, sha, path }) => {
+    if (!slugOk(repo) || !numberOk(number) || typeof path !== 'string' || typeof sha !== 'string') {
+      return { patch: null, truncated: false, error: 'Unknown file' }
+    }
+    try {
+      const file = await diffs.file(repo, number, sha, path)
+      if (!file) return { patch: null, truncated: false, error: 'No diff for this file (binary, renamed only, or too large for GitHub).' }
+      return { patch: file.text, truncated: file.truncated, error: null }
+    } catch (error) {
+      return { patch: null, truncated: false, error: (error as Error).message }
     }
   })
 
@@ -205,7 +272,10 @@ export default function activate(orca: OrcaWorkerApi): void {
     return fallback ? [...settings.defaults.keepBranches, fallback.toLowerCase()] : settings.defaults.keepBranches
   }
 
+  /** A merge, now or once checks pass, only while the pull request is open and still at the
+   *  commit the person looked at. */
   async function merge(
+    action: Extract<PrAction, 'merge' | 'auto-merge'>,
     repo: string,
     number: number,
     options: { method?: MergeMethod; deleteBranch?: boolean; sha?: string },
@@ -222,52 +292,18 @@ export default function activate(orca: OrcaWorkerApi): void {
       return { ok: false, message: `${repo}#${number} has new commits since it was listed. Refresh and look again.` }
     }
     const keep = options.deleteBranch ? await keepFor(repo, settings) : []
-    return act({ repo, number, action: 'merge', ...options }, head.headRefName, keep)
+    return act({ repo, number, action, ...options }, head.headRefName, keep)
   }
 
   orca.panels.handle('pr.act', async (input) => {
     if (!slugOk(input.repo) || !numberOk(input.number)) return { ok: false, message: 'Unknown pull request' }
     const settings = await readSettings(orca)
     const result =
-      input.action === 'merge'
-        ? await merge(input.repo, input.number, input, settings)
+      input.action === 'merge' || input.action === 'auto-merge'
+        ? await merge(input.action, input.repo, input.number, input, settings)
         : await act(input, null, settings.defaults.keepBranches)
     if (result.ok) changed([input.repo])
     return result
-  })
-
-  orca.panels.handle('group.merge', async ({ prs, method: chosen, deleteBranch }) => {
-    const settings = await readSettings(orca)
-    const valid = prs.filter((pr) => slugOk(pr.repo) && numberOk(pr.number))
-    const ordered = mergeSequence(
-      valid.map((pr) => ({ ...pr, key: `${pr.repo}#${pr.number}`, repoName: repoFor(pr.repo).name, waitsFor: pr.waitsFor ?? [] })),
-      settings.defaults.mergeOrder
-    )
-    const batch = new Set(ordered.map((pr) => pr.key))
-    const outside = ordered.flatMap((pr) => pr.waitsFor.filter((key) => !batch.has(key)).map((key) => `${pr.key} waits for ${key}`))
-    if (outside.length > 0) {
-      return {
-        results: ordered.map((pr) => ({
-          key: pr.key,
-          ok: false,
-          message: `${pr.repoName}#${pr.number}: not merged, ${outside.join('; ')}, still open`
-        }))
-      }
-    }
-    const results: { key: string; ok: boolean; message: string }[] = []
-    let stopped = false
-    for (const pr of ordered) {
-      const key = `${pr.repo}#${pr.number}`
-      if (stopped) {
-        results.push({ key, ok: false, message: `${pr.repoName}#${pr.number}: not merged, an earlier merge failed` })
-        continue
-      }
-      const result = await merge(pr.repo, pr.number, { method: chosen, deleteBranch, sha: pr.sha }, settings)
-      results.push({ key, ...result })
-      if (!result.ok) stopped = true
-    }
-    if (results.some((r) => r.ok)) changed(ordered.map((pr) => pr.repo))
-    return { results }
   })
 
   orca.panels.handle('pr.candidates', async ({ projectId }) => {
@@ -287,23 +323,61 @@ export default function activate(orca: OrcaWorkerApi): void {
     return { candidates: candidates.flatMap((c) => (c ? [c] : [])), error: list.error }
   })
 
-  /** A repo the worker found itself, looking again when an idle restart emptied its memory: the
-   *  panel never names an arbitrary folder. */
-  async function foundRepo(projectId: string | null, path: string): Promise<RepoInfo | null> {
-    const find = () => [...known.values()].find((repo) => repo.path === path) ?? null
-    if (find()) return find()
-    await listProject(projectId, false)
-    return find()
-  }
-
   orca.panels.handle('pr.create', async ({ projectId, repoPath, base, draft }) => {
-    const seen = await foundRepo(projectId ?? null, repoPath)
-    if (!seen || typeof base !== 'string' || !/^[A-Za-z0-9._/-]+$/.test(base)) {
+    const seen = await foundRepo(projectId ?? null, (repo) => repo.path === repoPath)
+    if (!seen || !branchOk(base)) {
       return { ok: false, message: 'Unknown repo or base branch. Refresh and try again.', url: null }
     }
-    const repo = await describeRepo(seen.path, seen.name)
+    const repo = { ...(await describeRepo(seen.path, seen.name)), short: seen.short }
     const result = await createPr(repo, base, draft === true)
     if (result.ok && repo.slug) changed([repo.slug])
+    return result
+  })
+
+  orca.panels.handle('task.checkout', async ({ projectId, items }) => {
+    const results = await Promise.all(
+      (items ?? []).map(async ({ repo, branch }): Promise<ActionResult> => {
+        if (!slugOk(repo)) return { ok: false, message: 'Unknown repo' }
+        const found = await foundRepo(projectId ?? null, (r) => r.slug === repo)
+        if (!found?.path) return { ok: false, message: `${repo}: no clone of it in this project` }
+        return switchBranch(found.path, found.short || found.name, branch)
+      })
+    )
+    if (results.some((r) => r.ok)) changed((items ?? []).map((i) => i.repo))
+    return { results }
+  })
+
+  orca.panels.handle('release.status', async ({ projectId }) => {
+    const [list, settings] = await Promise.all([listProject(projectId ?? null, false), readSettings(orca)])
+    const head = settings.defaults.developBranch
+    const base = settings.defaults.releaseBranch
+    if (!list.project) return { head, base, repos: [], error: list.error }
+    if (!base) return { head, base, repos: [], error: 'Set a release branch in the plugin settings first.' }
+    const repos = await Promise.all(
+      list.repos
+        .filter((r) => r.repo.slug)
+        .map(async ({ repo, prs }) => {
+          const pr = prs.find((p) => p.head === head && p.base === base) ?? null
+          try {
+            const c = await compare(repo.slug as string, base, head)
+            return { repo, ahead: c.ahead, behind: c.behind, commits: c.commits, pr, error: null }
+          } catch (error) {
+            const message = (error as Error).message
+            const missing = /not found|404|no common ancestor/i.test(message)
+            return { repo, ahead: null, behind: null, commits: [], pr, error: missing ? `No ${head} or ${base} branch to compare` : message }
+          }
+        })
+    )
+    return { head, base, repos, error: list.error }
+  })
+
+  orca.panels.handle('release.open', async ({ projectId, repo }) => {
+    if (!slugOk(repo)) return { ok: false, message: 'Unknown repo', url: null }
+    const found = await foundRepo(projectId ?? null, (r) => r.slug === repo)
+    if (!found) return { ok: false, message: `${repo} is not a repo of this project`, url: null }
+    const settings = await readSettings(orca)
+    const result = await openRelease(repo, settings.defaults.releaseBranch, settings.defaults.developBranch)
+    if (result.ok) changed([repo])
     return result
   })
 
@@ -339,5 +413,96 @@ export default function activate(orca: OrcaWorkerApi): void {
       return { ok: false, message: `Could not start ${agent}: ${(error as Error).message}` }
     }
   })
-}
 
+  // --- The status bar item and notifications follow the project the panel last showed.
+  let watched: string | null | undefined
+  let seen: Snapshot | null = null
+  let lastPrint = ''
+  let polling: Promise<void> | null = null
+
+  async function watchedProject(): Promise<string | null> {
+    if (watched === undefined) {
+      const stored = await orca.storage.get(WATCH_KEY).catch(() => null)
+      watched = typeof stored === 'string' ? stored : null
+    }
+    return watched
+  }
+
+  orca.panels.handle('watch.set', async ({ projectId }) => {
+    const next = typeof projectId === 'string' && projectId ? projectId : null
+    if (next !== (await watchedProject())) {
+      watched = next
+      seen = null
+      lastPrint = ''
+      await orca.storage.set(WATCH_KEY, next).catch(() => undefined)
+      void poll()
+    }
+    return { ok: true }
+  })
+
+  /** One look at a time: a look asked for while one runs waits for it, and a forced one (the
+   *  status bar's refresh) then looks again. */
+  async function poll(force = false): Promise<void> {
+    if (polling) {
+      await polling
+      if (!force) return
+    }
+    polling = look(force).finally(() => {
+      polling = null
+    })
+    return polling
+  }
+
+  async function look(force: boolean): Promise<void> {
+    try {
+      const settings = await readSettings(orca)
+      const data = await listProject(await watchedProject(), force)
+      const status = statusOf(data)
+      await orca.host
+        .call('statusBar.update', { id: STATUS_ITEM, text: status.text, tone: status.tone, tooltip: status.tooltip, visible: status.visible })
+        .catch(() => undefined)
+      if (!data.project || data.error) return
+      if (settings.notify) {
+        for (const note of whatChanged(seen, data)) {
+          await orca.host.call('notifications.show', note).catch(() => undefined)
+        }
+      }
+      seen = snapshot(data)
+      const print = fingerprint(data)
+      if (lastPrint && print !== lastPrint) orca.panels.post('prs.changed', { repos: [] })
+      lastPrint = print
+    } catch (error) {
+      orca.log(`status poll failed: ${(error as Error).message}`)
+    }
+  }
+
+  orca.commands.register('project-prs.refresh', async () => {
+    lists.clear()
+    await poll(true)
+    orca.panels.post('prs.changed', { repos: [] })
+    return 'Pull requests refreshed'
+  })
+
+  deactivate()
+  const first = setTimeout(() => void poll(), 3_000)
+  unref(first)
+  let timer: ReturnType<typeof setInterval> | null = null
+  const schedule = async () => {
+    const minutes = (await readSettings(orca)).defaults.refreshMinutes
+    if (timer) clearInterval(timer)
+    timer = minutes > 0 ? setInterval(() => void poll(), minutes * 60_000) : null
+    unref(timer)
+  }
+  void schedule()
+  let settingsChange: { dispose(): void } | undefined
+  try {
+    settingsChange = orca.settings.onDidChange(() => void schedule())
+  } catch {
+    // No settings:own: the default interval stays.
+  }
+  stopWatching = () => {
+    clearTimeout(first)
+    if (timer) clearInterval(timer)
+    settingsChange?.dispose()
+  }
+}
