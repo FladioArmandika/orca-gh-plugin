@@ -1,0 +1,139 @@
+{
+  "manifestVersion": 2,
+  "id": "project-prs",
+  "name": "Project PRs",
+  "version": "0.1.0",
+  "description": "Every open pull request of the GitHub repos inside an Orca project, grouped by task across repos: review, merge in order (backend first), and open PRs for a branch in each repo at once. Uses the gh CLI.",
+  "author": {
+    "name": "Fladio Armandika",
+    "url": "https://github.com/FladioArmandika"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/FladioArmandika/orca-gh-plugin",
+  "engines": {
+    "orca": ">=1.4.259"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "project-prs",
+        "title": "Project PRs",
+        "icon": "layers",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "settings": [
+      {
+        "key": "mergeMethod",
+        "title": "Merge method",
+        "description": "How pull requests into anything but the release branch are merged.",
+        "type": "string",
+        "default": "squash",
+        "enum": [
+          "squash",
+          "merge",
+          "rebase"
+        ],
+        "enumLabels": [
+          "Squash and merge",
+          "Create a merge commit",
+          "Rebase and merge"
+        ]
+      },
+      {
+        "key": "releaseBranch",
+        "title": "Release branch",
+        "description": "Pull requests into this branch (a release from development, say) use the release merge method. Leave empty to use the merge method everywhere.",
+        "type": "string",
+        "default": "main",
+        "placeholder": "main"
+      },
+      {
+        "key": "releaseMergeMethod",
+        "title": "Release merge method",
+        "type": "string",
+        "default": "merge",
+        "enum": [
+          "squash",
+          "merge",
+          "rebase"
+        ],
+        "enumLabels": [
+          "Squash and merge",
+          "Create a merge commit",
+          "Rebase and merge"
+        ]
+      },
+      {
+        "key": "deleteBranch",
+        "title": "Delete the branch after merging",
+        "description": "Ticked by default in the merge box. Branches listed below are never deleted.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "keepBranches",
+        "title": "Branches never deleted",
+        "description": "Space or comma separated. The release branch and each repo's default branch are always kept too.",
+        "type": "string",
+        "default": "main master development develop staging production release"
+      },
+      {
+        "key": "mergeOrder",
+        "title": "Merge order across repos",
+        "description": "Repo names, or name endings, in the order a task's pull requests merge: `be` matches shop-be. Repos not listed merge after, A to Z.",
+        "type": "string",
+        "default": "be backend api server",
+        "placeholder": "be admin fe"
+      },
+      {
+        "key": "newPrBase",
+        "title": "Base branch for new pull requests",
+        "description": "Leave empty to use the base most of the project's open feature pull requests use, else each repo's default branch.",
+        "type": "string",
+        "default": "",
+        "placeholder": "development"
+      },
+      {
+        "key": "reviewAgent",
+        "title": "Agent for Review with agent",
+        "description": "The id Orca knows the agent by (codex, gemini, opencode, ...). Until it is set, the review buttons ask for it.",
+        "type": "string",
+        "default": "",
+        "placeholder": "codex"
+      },
+      {
+        "key": "scanDepth",
+        "title": "Folder depth to look for repos",
+        "description": "How many folders down from a folder project the plugin looks for Git repositories.",
+        "type": "integer",
+        "default": 2,
+        "minimum": 1,
+        "maximum": 3
+      },
+      {
+        "key": "prLimit",
+        "title": "Pull requests per repo",
+        "type": "integer",
+        "default": 50,
+        "minimum": 5,
+        "maximum": 100
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "settings:own"
+    },
+    {
+      "kind": "agent:launch"
+    }
+  ]
+}
