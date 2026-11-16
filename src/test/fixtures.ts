@@ -2,8 +2,8 @@
 import type { ChecksSummary, PrDetail, PrSummary, ProjectPrs, RepoInfo } from '../protocol'
 
 const NOW = Date.UTC(2026, 10, 16, 9, 0, 0)
-const green: ChecksSummary = { total: 3, passed: 3, failed: 0, pending: 0 }
-const red: ChecksSummary = { total: 3, passed: 2, failed: 1, pending: 0 }
+const green: ChecksSummary = { total: 3, passed: 3, failed: 0, pending: 0, skipped: 0 }
+const red: ChecksSummary = { total: 3, passed: 2, failed: 1, pending: 0, skipped: 0 }
 
 export const repos: RepoInfo[] = [
   { name: 'shop-be', path: '/work/shop/shop-be', slug: 'acme/shop-be', branch: 'feat/42-gift-cards', problem: null },
@@ -35,6 +35,7 @@ export function pr(over: Partial<PrSummary> & Pick<PrSummary, 'repo' | 'number'>
     reviewRequestedFromMe: false,
     mine: false,
     task: '42',
+    waitsFor: [],
     ...over
   }
 }

@@ -29,7 +29,8 @@ export function checksLine(checks: ChecksSummary): string {
   const parts = [
     checks.failed ? `${checks.failed} failing` : '',
     checks.pending ? `${checks.pending} pending` : '',
-    checks.passed ? `${checks.passed} passed` : ''
+    checks.passed ? `${checks.passed} passed` : '',
+    checks.skipped ? `${checks.skipped} skipped` : ''
   ].filter(Boolean)
   return parts.join(' · ')
 }

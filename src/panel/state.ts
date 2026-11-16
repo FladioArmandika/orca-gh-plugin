@@ -193,7 +193,7 @@ export function mergeGroup(group: PrGroup, prs: readonly PrSummary[], method: Me
   return withBusy(`Merging ${prs.length} pull requests…`, async () => {
     const answer = await plugin.request(
       'group.merge',
-      { prs: prs.map((pr) => ({ repo: pr.repo, number: pr.number, sha: pr.headSha })), method, deleteBranch },
+      { prs: prs.map((pr) => ({ repo: pr.repo, number: pr.number, sha: pr.headSha, waitsFor: pr.waitsFor })), method, deleteBranch },
       { timeoutMs: 120_000 }
     )
     const failed = answer.results.some((r) => !r.ok)

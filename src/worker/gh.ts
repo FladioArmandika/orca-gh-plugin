@@ -11,6 +11,7 @@ import type {
   RepoInfo,
   TimelineItem
 } from '../protocol'
+import { parseDependencies, type DepRef } from '../shared/deps'
 import { taskOf } from '../shared/group'
 import { errorLine, notFound, run, type Run } from './exec'
 
@@ -35,13 +36,13 @@ const LIST_FIELDS = [
   'additions',
   'deletions',
   'labels',
-  'reviewRequests'
+  'reviewRequests',
+  'body'
 ].join(',')
 
 const DETAIL_FIELDS = [
   LIST_FIELDS,
   'state',
-  'body',
   'createdAt',
   'changedFiles',
   'files',
@@ -141,14 +142,15 @@ export function checkState(check: RawCheck): CheckState {
   }
 }
 
-/** Skipped and neutral checks count as passed, as GitHub's merge box does. */
+/** Skipped and neutral checks are counted apart; neither blocks a merge. */
 export function summarizeChecks(rollup: readonly RawCheck[] | null | undefined): ChecksSummary {
-  const summary = { total: 0, passed: 0, failed: 0, pending: 0 }
+  const summary = { total: 0, passed: 0, failed: 0, pending: 0, skipped: 0 }
   for (const check of rollup ?? []) {
     const state = checkState(check)
     summary.total++
     if (state === 'failed') summary.failed++
     else if (state === 'pending') summary.pending++
+    else if (state === 'skipped') summary.skipped++
     else summary.passed++
   }
   return summary
@@ -184,7 +186,8 @@ export function toSummary(raw: RawPr, repo: RepoInfo & { slug: string }, viewer:
     labels: (raw.labels ?? []).flatMap((l) => (l?.name ? [l.name] : [])),
     reviewRequestedFromMe: me !== null && (raw.reviewRequests ?? []).some((r) => r?.login?.toLowerCase() === me),
     mine: me !== null && author.toLowerCase() === me,
-    task: taskOf(raw.headRefName, raw.title)
+    task: taskOf(raw.headRefName, raw.title),
+    waitsFor: []
   }
 }
 
@@ -263,17 +266,21 @@ export async function viewerLogin(runner: Run = run): Promise<string | null> {
   }
 }
 
+/** A listed pull request with the dependencies its description names, before they are resolved
+ *  against the project's other pull requests. */
+export type ListedPr = PrSummary & { deps: DepRef[] }
+
 export async function listPrs(
   repo: RepoInfo & { slug: string },
   limit: number,
   viewer: string | null,
   runner: Run = run
-): Promise<PrSummary[]> {
+): Promise<ListedPr[]> {
   const raw = await ghJson<RawPr[]>(
     ['pr', 'list', '-R', repo.slug, '--state', 'open', '--limit', String(limit), '--json', LIST_FIELDS],
     runner
   )
-  return raw.map((pr) => toSummary(pr, repo, viewer))
+  return raw.map((pr) => ({ ...toSummary(pr, repo, viewer), deps: parseDependencies((pr as RawDetail).body) }))
 }
 
 export async function viewPr(

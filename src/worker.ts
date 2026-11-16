@@ -2,8 +2,9 @@
 // their pull requests, through the gh CLI. Orca transpiles this file when it loads.
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { ActionResult, MergeDefaults, MergeMethod, ProjectInfo, ProjectPrs, RepoInfo, RepoPrs } from './protocol'
-import { byMergeOrder, parseList } from './shared/group'
-import { act, defaultBranch, gh, listPrs, viewerLogin, viewPr } from './worker/gh'
+import { resolveDependency } from './shared/deps'
+import { mergeSequence, parseList } from './shared/group'
+import { act, defaultBranch, gh, listPrs, viewerLogin, viewPr, type ListedPr } from './worker/gh'
 import { candidateFor, createPr } from './worker/newpr'
 import { describeRepo, discoverRepos } from './worker/repos'
 
@@ -124,16 +125,33 @@ export default function activate(orca: OrcaWorkerApi): void {
     } catch (error) {
       return { ...base, repos: repos.map((repo) => ({ repo, prs: [], error: null })), error: (error as Error).message }
     }
-    const results = await Promise.all(
-      repos.map(async (repo): Promise<RepoPrs> => {
-        if (!repo.slug) return { repo, prs: [], error: repo.problem }
+    const listed = await Promise.all(
+      repos.map(async (repo) => {
+        if (!repo.slug) return { repo, prs: [] as ListedPr[], error: repo.problem }
         try {
           return { repo, prs: await listPrs({ ...repo, slug: repo.slug }, settings.prLimit, login), error: null }
         } catch (error) {
-          return { repo, prs: [], error: (error as Error).message }
+          return { repo, prs: [] as ListedPr[], error: (error as Error).message }
         }
       })
     )
+    // "Merge after be#12": keep the ones that point at a pull request still open here.
+    const names = repos.flatMap((r) => (r.slug ? [{ slug: r.slug, name: r.name }] : []))
+    const open = new Set(listed.flatMap((r) => r.prs.map((pr) => pr.key)))
+    const results: RepoPrs[] = listed.map(({ repo, prs, error }) => ({
+      repo,
+      error,
+      prs: prs.map(({ deps, ...pr }) => ({
+        ...pr,
+        waitsFor: [
+          ...new Set(
+            deps
+              .map((ref) => resolveDependency(ref, { slug: pr.repo, name: pr.repoName }, names))
+              .filter((key): key is string => !!key && key !== pr.key && open.has(key))
+          )
+        ]
+      }))
+    }))
     return { ...base, viewer: login, repos: results, error: null }
   }
 
@@ -221,10 +239,21 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('group.merge', async ({ prs, method: chosen, deleteBranch }) => {
     const settings = await readSettings(orca)
     const valid = prs.filter((pr) => slugOk(pr.repo) && numberOk(pr.number))
-    const ordered = byMergeOrder(
-      valid.map((pr) => ({ ...pr, repoName: repoFor(pr.repo).name })),
+    const ordered = mergeSequence(
+      valid.map((pr) => ({ ...pr, key: `${pr.repo}#${pr.number}`, repoName: repoFor(pr.repo).name, waitsFor: pr.waitsFor ?? [] })),
       settings.defaults.mergeOrder
     )
+    const batch = new Set(ordered.map((pr) => pr.key))
+    const outside = ordered.flatMap((pr) => pr.waitsFor.filter((key) => !batch.has(key)).map((key) => `${pr.key} waits for ${key}`))
+    if (outside.length > 0) {
+      return {
+        results: ordered.map((pr) => ({
+          key: pr.key,
+          ok: false,
+          message: `${pr.repoName}#${pr.number}: not merged, ${outside.join('; ')}, still open`
+        }))
+      }
+    }
     const results: { key: string; ok: boolean; message: string }[] = []
     let stopped = false
     for (const pr of ordered) {

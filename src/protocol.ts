@@ -13,7 +13,7 @@ export type RepoInfo = {
   problem: string | null
 }
 
-export type ChecksSummary = { total: number; passed: number; failed: number; pending: number }
+export type ChecksSummary = { total: number; passed: number; failed: number; pending: number; skipped: number }
 export type CheckState = 'passed' | 'failed' | 'pending' | 'skipped'
 export type MergeMethod = 'squash' | 'merge' | 'rebase'
 
@@ -45,6 +45,9 @@ export type PrSummary = {
   mine: boolean
   /** The task id in the branch (`feat/1234-...`) or title (`(BE-52)`), upper-cased. */
   task: string | null
+  /** Open pull requests of the project this one waits for, by key, from its description
+   *  ("Merge after be#12"). */
+  waitsFor: string[]
 }
 
 export type RepoPrs = { repo: RepoInfo; prs: PrSummary[]; error: string | null }
@@ -147,7 +150,7 @@ declare module 'orca' {
      *  at the first that fails. */
     'group.merge': {
       input: {
-        prs: { repo: string; number: number; sha: string }[]
+        prs: { repo: string; number: number; sha: string; waitsFor?: string[] }[]
         method?: MergeMethod
         deleteBranch?: boolean
       }

@@ -10,7 +10,8 @@ let root = ''
 let calls: string[][] = []
 
 const ok = (stdout: string) => ({ code: 0, stdout, stderr: '' })
-const rawPr = (repo: string, number: number, head: string) => ({
+const rawPr = (repo: string, number: number, head: string, body = '') => ({
+  body,
   number,
   title: `change ${number}`,
   url: `https://github.com/acme/${repo}/pull/${number}`,
@@ -29,7 +30,10 @@ const rawPr = (repo: string, number: number, head: string) => ({
 })
 const PRS: Record<string, unknown[]> = {
   'acme/shop-be': [rawPr('shop-be', 77, 'feat/42-gift-cards')],
-  'acme/shop-fe': [rawPr('shop-fe', 31, 'feat/42-gift-cards')],
+  'acme/shop-fe': [
+    rawPr('shop-fe', 31, 'feat/42-gift-cards', '**Pairs with:** shop-be (merge the backend first, after be#77)'),
+    rawPr('shop-fe', 32, 'fix/7-typo', 'Fixes fe#20. Merge after be#999.')
+  ],
   'acme/shop-admin': []
 }
 
@@ -105,8 +109,10 @@ test('lists every repo of the focused project, and caches it', async () => {
   assert.deepEqual(list.repos.map((r) => [r.repo.name, r.repo.slug, r.prs.length]), [
     ['shop-admin', 'acme/shop-admin', 0],
     ['shop-be', 'acme/shop-be', 1],
-    ['shop-fe', 'acme/shop-fe', 1]
+    ['shop-fe', 'acme/shop-fe', 2]
   ])
+  assert.deepEqual(list.repos[2].prs.map((pr) => pr.waitsFor), [['acme/shop-be#77'], []], 'only open pull requests of the project count')
+  assert.equal('deps' in list.repos[2].prs[0], false, 'descriptions stay in the worker')
   assert.equal(list.repos[1].prs[0].mine, true)
   const listed = calls.filter((c) => c[0] === 'gh' && c[2] === 'list').length
   await worker.request('prs.list', { projectId: 'p1' })
@@ -214,5 +220,28 @@ test('asks for a review agent before starting one', async () => {
   assert.equal(result.ok, false)
   assert.match(result.message, /Settings/)
   assert.equal(h.callsOf('agent.launch').length, 0)
+  await worker.deactivate()
+})
+
+test('refuses a group merge that waits for a pull request outside it', async () => {
+  const worker = await mountWorker(main, { host: host() })
+  const answer = await worker.request('group.merge', {
+    prs: [{ repo: 'acme/shop-fe', number: 31, sha: 'sha-31', waitsFor: ['acme/shop-be#77'] }]
+  })
+  assert.deepEqual(answer.results.map((r) => r.ok), [false])
+  assert.match(answer.results[0].message, /waits for acme\/shop-be#77/)
+  assert.equal(calls.filter((c) => c[0] === 'gh' && c[2] === 'merge').length, 0)
+  await worker.deactivate()
+})
+
+test('merges what a pull request waits for first, whatever the repo order', async () => {
+  const worker = await mountWorker(main, { host: host() })
+  const answer = await worker.request('group.merge', {
+    prs: [
+      { repo: 'acme/shop-be', number: 77, sha: 'sha-77', waitsFor: ['acme/shop-fe#31'] },
+      { repo: 'acme/shop-fe', number: 31, sha: 'sha-31' }
+    ]
+  })
+  assert.deepEqual(answer.results.map((r) => r.key), ['acme/shop-fe#31', 'acme/shop-be#77'])
   await worker.deactivate()
 })

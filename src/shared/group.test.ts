@@ -1,6 +1,6 @@
 import { assert, test } from 'orca/testing'
 import { bePr, fePr, lonePr, pr } from '../test/fixtures'
-import { groupPrs, isReady, matches, methodFor, parseList, repoRank, taskOf } from './group'
+import { groupPrs, isReady, matches, mergeSequence, methodFor, parseList, repoRank, taskOf, waitsOutside } from './group'
 
 test('reads the task id from the branch, then the title', () => {
   assert.equal(taskOf('feat/1234-gift-cards', 'x'), '1234')
@@ -52,4 +52,13 @@ test('uses the release merge method only into the release branch', () => {
   assert.equal(methodFor({ base: 'development' }, defaults), 'squash')
   assert.equal(methodFor({ base: 'main' }, defaults), 'merge')
   assert.equal(methodFor({ base: 'main' }, { ...defaults, releaseBranch: '' }), 'squash')
+})
+
+test('merges what a pull request waits for first, and names waits outside the set', () => {
+  const a = pr({ repo: 'acme/shop-be', number: 1, waitsFor: ['acme/shop-fe#2'] })
+  const b = pr({ repo: 'acme/shop-fe', number: 2 })
+  const c = pr({ repo: 'acme/shop-admin', number: 3, waitsFor: ['acme/shop-be#9'] })
+  assert.deepEqual(mergeSequence([a, b], ['be']).map((p) => p.number), [2, 1])
+  assert.deepEqual(waitsOutside([a, b, c]), [['acme/shop-admin#3', 'acme/shop-be#9']])
+  assert.equal(isReady(c), false, 'waiting on an open pull request is not ready')
 })

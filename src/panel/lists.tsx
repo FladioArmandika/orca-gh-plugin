@@ -23,8 +23,19 @@ import {
   Text
 } from 'orca'
 import type { NewPrCandidate, PrSummary, ProjectPrs } from '../protocol'
-import { FILTERS, groupPrs, isReady, matches, methodFor, needsAttention, type PrFilter, type PrGroup } from '../shared/group'
-import { confirmBox, noticeBox, prItem } from './parts'
+import {
+  byMergeOrder,
+  FILTERS,
+  groupPrs,
+  isReady,
+  matches,
+  methodFor,
+  needsAttention,
+  waitsOutside,
+  type PrFilter,
+  type PrGroup
+} from '../shared/group'
+import { confirmBox, noticeBox, prItem, waitsLine } from './parts'
 import {
   allPrs,
   ask,
@@ -153,18 +164,28 @@ function confirmGroupMerge(group: PrGroup, data: ProjectPrs) {
 function groupCard(group: PrGroup, data: ProjectPrs) {
   const mergeable = group.prs.filter((pr) => !pr.draft)
   const order = group.prs.map((pr) => pr.repoName).join(' → ')
+  const blocked = waitsOutside(mergeable)
   return (
     <Card key={group.key} title={group.label} description={`${group.branch ?? 'several branches'} · ${order}`}>
       <Stack gap="xs">
         <List label={group.label}>{group.prs.map((pr) => prItem(pr, true))}</List>
+        {blocked.length > 0 ? (
+          <Text size="sm" tone="warning">
+            {`${waitsLine(blocked)}, still open. Merge that first.`}
+          </Text>
+        ) : null}
         <Row gap="xs" wrap>
           <Button
             size="sm"
             variant="outline"
             tone="success"
             icon="check"
-            disabled={!!read(busy) || mergeable.length === 0}
-            tooltip="Merge each PR in the configured repo order (backend first)"
+            disabled={!!read(busy) || mergeable.length === 0 || blocked.length > 0}
+            tooltip={
+              blocked.length > 0
+                ? 'Waits for a pull request outside this task'
+                : 'Merge each PR in repo order (backend first), after the ones it waits for'
+            }
             onPress={() => confirmGroupMerge(group, data)}
           >
             {`Merge ${mergeable.length} in order`}
@@ -204,7 +225,10 @@ function byTask(data: ProjectPrs, prs: PrSummary[]) {
 function byRepo(data: ProjectPrs, prs: PrSummary[]) {
   return (
     <Stack gap="xs">
-      {data.repos.map(({ repo, error }) => {
+      {byMergeOrder(
+        data.repos.map((r) => ({ ...r, repoName: r.repo.name })),
+        data.defaults.mergeOrder
+      ).map(({ repo, error }) => {
         const mine = prs.filter((pr) => pr.repo === repo.slug)
         const where = `${repo.slug ?? 'no GitHub remote'}${repo.branch ? ` · on ${repo.branch}` : ''}`
         return (

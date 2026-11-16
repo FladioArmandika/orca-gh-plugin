@@ -2,12 +2,30 @@
 import { Badge, Button, Callout, ListItem, read, RelativeTime, Row, set, Text } from 'orca'
 import type { PrSummary } from '../protocol'
 import { badges } from '../shared/look'
-import { busy, confirmPending, notice, openPr, pending } from './state'
+import { allPrs, busy, confirmPending, notice, openPr, pending } from './state'
+
+/** `shop-be#12` for a pull request key, from the list when it is there. */
+export function prLabel(key: string): string {
+  const pr = allPrs().find((p) => p.key === key)
+  if (pr) return `${pr.repoName}#${pr.number}`
+  const [slug, number] = key.split('#')
+  return `${slug.split('/')[1] ?? slug}#${number}`
+}
+
+/** "shop-be#13 waits for shop-be#12" for each pair. */
+export function waitsLine(pairs: readonly [string, string][]): string {
+  return pairs.map(([waiting, waited]) => `${prLabel(waiting)} waits for ${prLabel(waited)}`).join('; ')
+}
 
 export function badgeRow(pr: PrSummary) {
   const looks = badges(pr)
   return (
     <Row gap="xs" wrap align="center">
+      {pr.waitsFor.map((key) => (
+        <Badge key={`waits-${key}`} tone="warning">
+          {`Waits for ${prLabel(key)}`}
+        </Badge>
+      ))}
       {looks.map((look) => (
         <Badge key={look.text} tone={look.tone}>
           {look.text}

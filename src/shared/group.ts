@@ -39,6 +39,30 @@ export function byMergeOrder<T extends { repoName: string }>(items: readonly T[]
   )
 }
 
+type Sequenced = { key: string; repoName: string; waitsFor: readonly string[] }
+
+/** Repo order, then moved so each pull request comes after the ones of the set it waits for. */
+export function mergeSequence<T extends Sequenced>(items: readonly T[], order: readonly string[]): T[] {
+  const inSet = new Set(items.map((item) => item.key))
+  let remaining = byMergeOrder(items, order)
+  const placed = new Set<string>()
+  const out: T[] = []
+  while (remaining.length > 0) {
+    // A cycle in the descriptions falls back to repo order rather than stalling.
+    const next = remaining.find((item) => item.waitsFor.every((key) => !inSet.has(key) || placed.has(key))) ?? remaining[0]
+    out.push(next)
+    placed.add(next.key)
+    remaining = remaining.filter((item) => item !== next)
+  }
+  return out
+}
+
+/** Dependencies of the set's pull requests on open ones outside it: `[waiting, waitedFor]`. */
+export function waitsOutside(items: readonly Sequenced[]): [string, string][] {
+  const inSet = new Set(items.map((item) => item.key))
+  return items.flatMap((item) => item.waitsFor.filter((key) => !inSet.has(key)).map((key): [string, string] => [item.key, key]))
+}
+
 export type PrGroup = {
   key: string
   /** `Task 1234`, or the branch when no task id is found. */
@@ -70,7 +94,7 @@ export function groupPrs(prs: readonly PrSummary[], order: readonly string[]): P
         key,
         label: task ? `Task ${task}` : items[0].head,
         branch,
-        prs: byMergeOrder(items, order),
+        prs: mergeSequence(items, order),
         updatedAt: Math.max(...items.map((pr) => pr.updatedAt))
       }
     })
@@ -87,10 +111,12 @@ export const FILTERS: readonly { value: PrFilter; label: string }[] = [
   { value: 'attention', label: 'Needs attention' }
 ]
 
-/** No failing or pending checks, no conflicts, and no review still owed or asking for changes. */
+/** No failing or pending checks, no conflicts, no open pull request it waits for, and no review
+ *  still owed or asking for changes. */
 export function isReady(pr: PrSummary): boolean {
   return (
     !pr.draft &&
+    pr.waitsFor.length === 0 &&
     pr.checks.failed === 0 &&
     pr.checks.pending === 0 &&
     pr.mergeable !== 'CONFLICTING' &&

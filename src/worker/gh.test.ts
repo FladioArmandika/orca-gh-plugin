@@ -3,7 +3,7 @@ import { actionArgs, flagsFor, summarizeChecks, toDetail, toSummary } from './gh
 
 const repo = { name: 'shop-be', path: '/work/shop/shop-be', slug: 'acme/shop-be', branch: null, problem: null }
 
-test('counts checks as GitHub does: skipped passes, cancelled fails', () => {
+test('counts checks: skipped apart, cancelled fails', () => {
   assert.deepEqual(
     summarizeChecks([
       { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' },
@@ -13,9 +13,9 @@ test('counts checks as GitHub does: skipped passes, cancelled fails', () => {
       { __typename: 'StatusContext', state: 'PENDING' },
       { __typename: 'StatusContext', state: 'ERROR' }
     ]),
-    { total: 6, passed: 2, failed: 2, pending: 2 }
+    { total: 6, passed: 1, failed: 2, pending: 2, skipped: 1 }
   )
-  assert.deepEqual(summarizeChecks(null), { total: 0, passed: 0, failed: 0, pending: 0 })
+  assert.deepEqual(summarizeChecks(null), { total: 0, passed: 0, failed: 0, pending: 0, skipped: 0 })
 })
 
 test('turns gh pr list JSON into a summary', () => {

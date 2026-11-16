@@ -1,12 +1,12 @@
 // The panel with the worker stood in for: what each plugin.request answers.
 import { afterEach, assert, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import * as panel from './panel'
-import { bePr, detailOf, fePr, projectPrs } from './test/fixtures'
+import { bePr, detailOf, fePr, lonePr, projectPrs, repos } from './test/fixtures'
 
 let view: TestPanel | undefined
 afterEach(() => view?.unmount())
 
-function stubs(log: { name: string; input: unknown }[] = []) {
+function stubs(log: { name: string; input: unknown }[] = [], data = projectPrs()) {
   const record =
     <T,>(name: string, answer: (input: any) => T) =>
     (input: unknown) => {
@@ -20,7 +20,7 @@ function stubs(log: { name: string; input: unknown }[] = []) {
         projects: [{ id: 'p1', name: 'shop', kind: 'folder', path: '/work/shop' }],
         focusedProjectId: 'p1'
       })),
-      'prs.list': record('prs.list', () => projectPrs()),
+      'prs.list': record('prs.list', () => data),
       'pr.detail': record('pr.detail', ({ repo, number }) => ({
         detail: detailOf(repo === bePr.repo && number === bePr.number ? bePr : fePr),
         error: null
@@ -86,4 +86,32 @@ test('opens a pull request and merges it with the head commit', async () => {
   assert.ok(view.find({ label: 'shop-be (1)' }))
   assert.deepEqual(view.errors, [])
   assert.deepEqual(view.refusals, [])
+})
+
+test('holds a task whose pull request waits for one outside it', async () => {
+  const waiting = { ...fePr, waitsFor: [lonePr.key] }
+  const data = projectPrs({
+    repos: [
+      { repo: repos[0], prs: [bePr], error: null },
+      { repo: repos[1], prs: [waiting], error: null },
+      { repo: repos[2], prs: [lonePr], error: null }
+    ]
+  })
+  view = await mount(panel, { host: stubs([], data) })
+  assert.ok(view.find({ text: 'Waits for shop-admin#9' }), 'the row says what it waits for')
+  assert.ok(view.find({ text: 'shop-fe#31 waits for shop-admin#9, still open. Merge that first.' }))
+  assert.equal(view.find({ role: 'button', text: 'Merge 2 in order' })?.disabled, true)
+  assert.deepEqual(view.errors, [])
+})
+
+test('warns when one pull request is merged before its task\'s backend', async () => {
+  const log: { name: string; input: unknown }[] = []
+  view = await mount(panel, { host: stubs(log) })
+  await view.select({ label: 'View' }, 'repo')
+  await view.press({ text: /#31 feat\(cards\)/ })
+  await view.press({ role: 'button', text: 'Merge' })
+  assert.ok(view.find({ text: /shop-be#77 of the same task merges first/ }))
+  assert.ok(view.find({ role: 'button', text: 'Merge anyway' }))
+  await view.press({ role: 'button', text: 'Cancel' })
+  assert.equal(log.filter((l) => l.name === 'pr.act').length, 0)
 })

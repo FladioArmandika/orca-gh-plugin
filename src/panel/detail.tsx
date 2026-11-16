@@ -25,9 +25,9 @@ import {
   Textarea
 } from 'orca'
 import type { MergeDefaults, MergeMethod, PrDetail, PrSummary } from '../protocol'
-import { groupKey, groupPrs, isReady, methodFor } from '../shared/group'
+import { groupKey, groupPrs, isReady, methodFor, waitsOutside } from '../shared/group'
 import { checksLine, mergeLine, reviewLook } from '../shared/look'
-import { confirmBox, noticeBox, prItem } from './parts'
+import { confirmBox, noticeBox, prItem, prLabel, waitsLine } from './parts'
 import {
   actOn,
   allPrs,
@@ -101,7 +101,10 @@ function facts(d: PrDetail) {
   return (
     <KeyValue
       items={[
-        { label: 'Repository', value: `${d.repoName} · ${d.repo}`, code: false },
+        { label: 'Repository', value: d.repo },
+        ...(d.waitsFor.length
+          ? [{ label: 'Waits for', value: `${d.waitsFor.map(prLabel).join(', ')} (still open)`, tone: 'warning' as const }]
+          : []),
         { label: 'Branch', value: `${d.head} → ${d.base}`, code: true },
         { label: 'Author', value: d.author },
         { label: 'Review', value: review?.text ?? 'No review required', tone: review?.tone },
@@ -132,18 +135,25 @@ function siblingsCard(d: PrDetail, siblings: PrSummary[], defaults: MergeDefault
   const all = [d, ...siblings]
   const group = groupPrs(all, defaults.mergeOrder)[0]
   const open = group.prs.filter((pr) => !pr.draft)
+  const blocked = waitsOutside(open)
   const method = methodFor(d, defaults)
   return (
     <Card title={`Same ${d.task ? `task (${d.task})` : 'branch'} in other repos`} description={`Merge order: ${group.prs.map((p) => p.repoName).join(' → ')}`}>
       <Stack gap="xs">
         <List label="Related pull requests">{siblings.map((pr) => prItem(pr, true))}</List>
+        {blocked.length > 0 ? (
+          <Text size="sm" tone="warning">
+            {`${waitsLine(blocked)}, still open. Merge that first.`}
+          </Text>
+        ) : null}
         <Row gap="xs" wrap>
           <Button
             size="sm"
             variant="outline"
             tone="success"
             icon="check"
-            disabled={!!read(busy) || d.state !== 'OPEN' || open.length === 0}
+            disabled={!!read(busy) || d.state !== 'OPEN' || open.length === 0 || blocked.length > 0}
+            tooltip={blocked.length > 0 ? 'Waits for a pull request outside this task' : undefined}
             onPress={() =>
               ask({
                 title: `Merge all ${open.length} in order?`,
@@ -168,8 +178,20 @@ function siblingsCard(d: PrDetail, siblings: PrSummary[], defaults: MergeDefault
   )
 }
 
-function mergeCard(d: PrDetail, defaults: MergeDefaults) {
+/** Why merging this one alone now would go against the order: what it waits for, and the same
+ *  task's pull requests that merge before it (backend first). */
+function orderWarnings(d: PrDetail, siblings: PrSummary[], defaults: MergeDefaults): { waits: string; earlier: string } {
+  const sequence = groupPrs([d, ...siblings], defaults.mergeOrder)[0].prs
+  const before = sequence.slice(0, sequence.findIndex((pr) => pr.key === d.key)).filter((pr) => !pr.draft)
+  return {
+    waits: d.waitsFor.length ? `It waits for ${d.waitsFor.map(prLabel).join(', ')}, still open.` : '',
+    earlier: before.length ? `${before.map((pr) => `${pr.repoName}#${pr.number}`).join(', ')} of the same task merge${before.length === 1 ? 's' : ''} first.` : ''
+  }
+}
+
+function mergeCard(d: PrDetail, siblings: PrSummary[], defaults: MergeDefaults) {
   if (d.state !== 'OPEN') return null
+  const { waits, earlier } = orderWarnings(d, siblings, defaults)
   const method = read(methodChoice) ?? methodFor(d, defaults)
   const kept = defaults.keepBranches.includes(d.head.toLowerCase())
   const remove = !kept && (read(deleteChoice) ?? defaults.deleteBranch)
@@ -202,10 +224,14 @@ function mergeCard(d: PrDetail, defaults: MergeDefaults) {
                 title: `Merge ${d.repoName}#${d.number}?`,
                 body:
                   `${METHODS.find((m) => m.value === method)?.label} into ${d.base}${remove ? `, then delete ${d.head}` : ''}.` +
-                  (isReady(d) ? '' : ` Not everything is green: ${mergeLine(d)}, ${checksLine(d.checks)}.`) +
+                  (waits ? ` ${waits}` : '') +
+                  (earlier ? ` ${earlier}` : '') +
+                  (d.checks.failed || d.checks.pending || d.mergeable === 'CONFLICTING'
+                    ? ` Not everything is green: ${mergeLine(d)}, ${checksLine(d.checks)}.`
+                    : '') +
                   (d.flags.length ? ` Heads-up: ${d.flags.join('; ')}.` : ''),
-                label: 'Merge',
-                tone: isReady(d) && d.flags.length === 0 ? 'success' : 'warning',
+                label: waits || earlier ? 'Merge anyway' : 'Merge',
+                tone: waits ? 'danger' : isReady(d) && !earlier && d.flags.length === 0 ? 'success' : 'warning',
                 run: () => actOn(d, 'merge', { method, deleteBranch: remove, sha: d.headSha })
               })
             }
@@ -377,8 +403,12 @@ function conversation(d: PrDetail) {
 
 export function detailView() {
   const key = read(selected)
-  const d = read(detail)
-  const summary = allPrs().find((pr) => pr.key === key) ?? d
+  // The worker resolves what a pull request waits for across the project's list; the detail
+  // alone cannot, so it takes the list's answer.
+  const fetched = read(detail)
+  const listed = allPrs().find((pr) => pr.key === key)
+  const d = fetched && listed ? { ...fetched, waitsFor: listed.waitsFor } : fetched
+  const summary = listed ?? d
   const error = read(detailError)
   const defaults = read(list)?.defaults ?? FALLBACK_DEFAULTS
   if (!summary) return null
@@ -398,7 +428,9 @@ export function detailView() {
       {header(d)}
       <Heading level={2}>{d.title}</Heading>
       <Row gap="xs" wrap align="center">
-        <Badge tone={stateTone}>{d.draft && d.state === 'OPEN' ? 'Draft' : d.state.toLowerCase()}</Badge>
+        <Badge tone={stateTone}>
+          {d.draft && d.state === 'OPEN' ? 'Draft' : d.state.charAt(0) + d.state.slice(1).toLowerCase()}
+        </Badge>
         <Badge>{`${d.repoName}#${d.number}`}</Badge>
         {d.labels.map((label) => (
           <Badge key={label} tone="neutral">
@@ -416,7 +448,7 @@ export function detailView() {
       ))}
       {facts(d)}
       {siblingsCard(d, siblings, defaults)}
-      {mergeCard(d, defaults)}
+      {mergeCard(d, siblings, defaults)}
       {reviewCard(d, siblings, defaults)}
       {stateActions(d)}
       {checksSection(d)}
